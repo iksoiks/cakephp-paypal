@@ -30,128 +30,105 @@ class PaypalRedirectException extends CakeException {}
 class Paypal {
 
 /**
+ * HttpSocket utility class
+ */
+	public $HttpSocket = null;
+	/**
+	 * CakeRequest
+	 */
+	public $CakeRequest = null;
+	/**
  * Target version for "Classic" Paypal API
  */
 	protected $paypalClassicApiVersion = '104.0';
-
 /**
  * Live or sandbox
  */
 	protected $sandboxMode = true;
-
 /**
  * API credentials - nvp username
  */
 	protected $nvpUsername = null;
-
 /**
  * API credentials - nvp password
  */
 	protected $nvpPassword = null;
-
 /**
  * API credentials - nvp signature
  */
 	protected $nvpSignature = null;
-
 /**
  * API credentials - nvp token
  */
     protected $nvpToken = null;
-
 /**
  * API credentials - Adaptive App ID
  */
     protected $adaptiveAppID = null;
-
 /**
  * API credentials - Adaptive User ID
  */
     protected $adaptiveUserID = null;
-
 /**
  * API credentials - Application id
  */
 	protected $oAuthAppId = null;
-
 /**
  * API credentials - oAuth client id
  */
 	protected $oAuthClientId = null;
-
 /**
  * API credentials - oAuth secret
  */
 	protected $oAuthSecret = null;
-
 /**
  * API credentials - oAuth access token
  */
 	protected $oAuthAccessToken = null;
-
 /**
  * Live endpoint for REST API
  */
 	protected $liveRestEndpoint = 'https://api.paypal.com';
-
 /**
  * Sandbox endpoint for REST API
  */
 	protected $sandboxRestEndpoint = 'https://api.sandbox.paypal.com';
-
 /**
  * Live endpoint for Classic API
  */
 	protected $liveClassicEndpoint = 'https://api-3t.paypal.com/nvp';
-
 /**
  * Sandbox endpoint for Classic API
  */
 	protected $sandboxClassicEndpoint = 'https://api-3t.sandbox.paypal.com/nvp';
-
 /**
  * Live endpoint for Adaptive Accounts API
  */
     protected $liveAdaptiveAccountsEndpoint = 'https://svcs.paypal.com/AdaptiveAccounts/';
-
 /**
  * Sandbox endpoint for Adaptive Accounts API
  */
     protected $sandboxAdaptiveAccountsEndpoint = 'https://svcs.sandbox.paypal.com/AdaptiveAccounts/';
-
 /**
  * Live endpoint for Paypal web login (used in classic paypal payments)
  */
 	protected $livePaypalLoginUri = 'https://www.paypal.com/webscr';
-
 /**
  * Sandbox endpoint for Paypal web login (used in classic paypal payments)
  */
 	protected $sandboxPaypalLoginUri = 'https://www.sandbox.paypal.com/webscr';
-
 /**
  * More descriptive API error messages. Error code and message.
  *
  * @var array
  */
 	protected $errorMessages = array();
-
 /**
  * Redirect error codes
  *
  * @var array
  */
 	protected $redirectErrors = array(10411, 10412, 10422, 10445, 10486);
-
-/**
- * HttpSocket utility class
- */
-	public $HttpSocket = null;
-
-/**
- * CakeRequest
- */
-	public $CakeRequest = null;
 
 /**
  * Constructor. Takes API credentials, and other properties to set (e.g sandbox mode)
@@ -262,18 +239,17 @@ class Paypal {
     }
 
 /**
- * Returns custom error message if there are any set for the error code passed in with the parsed response.
- * Returns the long message in the response otherwise.
+ * Returns Paypal Adaptive Accounts API endpoint
  *
  * @author Chris Green
- * @param  array $parsed  Parsed response
- * @return string         The error message
- */
-	public function getErrorMessage($parsed) {
-		if (array_key_exists($parsed['L_ERRORCODE0'], $this->errorMessages)) {
-			return $this->errorMessages[$parsed['L_ERRORCODE0']];
+ * @return string
+ **/
+	public function getAdaptiveAccountsEndpoint()
+	{
+		if ($this->sandboxMode) {
+			return $this->sandboxAdaptiveAccountsEndpoint;
 		}
-		return $parsed['L_LONGMESSAGE0'];
+		return $this->liveAdaptiveAccountsEndpoint;
 	}
 
 /**
@@ -318,6 +294,162 @@ class Paypal {
 	}
 
 /**
+ * Formats the order array to Paypal nvps
+ *
+ * @param array $order Takes an array order (See tests for supported fields).
+ * @return array Formatted array of Paypal NVPs for setExpressCheckout
+ * @author Rob Mcvey
+ **/
+	public function buildExpressCheckoutNvp($order)
+	{
+		if (empty($order) || !is_array($order)) {
+			throw new PaypalException(__d('paypal', 'You must pass a valid order array'));
+		}
+		if (!isset($order['return']) || !isset($order['cancel'])) {
+			throw new PaypalException(__d('paypal', 'Valid "return" and "cancel" urls must be provided'));
+		}
+		if (!isset($order['currency'])) {
+			throw new PaypalException(__d('paypal', 'You must provide a currency code'));
+		}
+		$nvps = array(
+			'METHOD' => 'SetExpressCheckout',
+			'VERSION' => $this->paypalClassicApiVersion,
+			'PAYMENTREQUEST_0_PAYMENTACTION' => 'Sale',
+			'USER' => $this->nvpUsername,
+			'PWD' => $this->nvpPassword,
+			'SIGNATURE' => $this->nvpSignature,
+			'RETURNURL' => $order['return'],
+			'CANCELURL' => $order['cancel'],
+			'PAYMENTREQUEST_0_CURRENCYCODE' => $order['currency'],
+			'PAYMENTREQUEST_0_DESC' => $order['description'],
+		);
+		// Custom field?
+		if (isset($order['custom'])) {
+			$nvps['PAYMENTREQUEST_0_CUSTOM'] = $order['custom'];
+		}
+		// Add up each item and calculate totals
+		if (isset($order['items']) && is_array($order['items'])) {
+			// Cart totals
+			$nvps['PAYMENTREQUEST_0_ITEMAMT'] = 0;
+			$individualShipping = $nvps['PAYMENTREQUEST_0_SHIPPINGAMT'] = 0;
+			$nvps['PAYMENTREQUEST_0_TAXAMT'] = 0;
+			$nvps['PAYMENTREQUEST_0_AMT'] = 0;
+			// Build each item
+			foreach ($order['items'] as $m => $item) {
+				// Name and subtotal are required for each item
+				$nvps["L_PAYMENTREQUEST_0_NAME$m"] = $item['name'];
+				// Description an Tax are optional
+				if (array_key_exists("description", $item)) {
+					$nvps["L_PAYMENTREQUEST_0_DESC$m"] = $item['description'];
+				}
+				// Qty is optional however it effects our order totals
+				$quantity = $nvps["L_PAYMENTREQUEST_0_QTY$m"] = 1;
+				if (array_key_exists("qty", $item) && $item['qty'] > 1 && is_numeric($item['qty'])) {
+					$quantity = $nvps["L_PAYMENTREQUEST_0_QTY$m"] = (int)floor($item['qty']);
+				}
+				// Item subtotal
+				$nvps["L_PAYMENTREQUEST_0_AMT$m"] = $item['subtotal'];
+				// Shipping
+				if (array_key_exists("shipping", $item)) {
+					//$nvps['PAYMENTREQUEST_0_SHIPPINGAMT'] += ($item['shipping'] * $quantity);
+					$individualShipping += ($item['shipping'] * $quantity);
+				}
+				// Tax
+				if (array_key_exists("tax", $item)) {
+					$nvps["L_PAYMENTREQUEST_0_TAXAMT$m"] = $item['tax'];
+					$nvps['PAYMENTREQUEST_0_AMT'] += ($item['tax'] * $quantity);
+					$nvps['PAYMENTREQUEST_0_TAXAMT'] += ($item['tax'] * $quantity);
+				}
+				// Cart totals
+				$nvps['PAYMENTREQUEST_0_ITEMAMT'] += ($nvps["L_PAYMENTREQUEST_0_AMT$m"] * $quantity);
+				$nvps['PAYMENTREQUEST_0_AMT'] += ($nvps["L_PAYMENTREQUEST_0_AMT$m"] * $quantity);
+			}
+		}
+		// Custom/combined shipping for all items
+		if (isset($order['shipping']) && $order['shipping'] > 1 && is_numeric($order['shipping'])) {
+			$nvps['PAYMENTREQUEST_0_SHIPPINGAMT'] = $order['shipping'];
+			$nvps['PAYMENTREQUEST_0_AMT'] += $nvps['PAYMENTREQUEST_0_SHIPPINGAMT'];
+		} else if (isset($individualShipping)) {
+			$nvps['PAYMENTREQUEST_0_SHIPPINGAMT'] = $individualShipping;
+			$nvps['PAYMENTREQUEST_0_AMT'] += $individualShipping;
+		}
+		if (isset($order['UNSUPPORTED'])) {
+			$nvps = array_merge($order['UNSUPPORTED'], $nvps);
+		}
+		return $nvps;
+	}
+
+	/**
+	 * Returns the Paypal Classic API endpoint
+	 *
+	 * @return string
+	 * @author Rob Mcvey
+	 **/
+	public function getClassicEndpoint()
+	{
+		if ($this->sandboxMode) {
+			return $this->sandboxClassicEndpoint;
+		}
+		return $this->liveClassicEndpoint;
+	}
+
+	/**
+	 * Parse the body of the reponse from setExpressCheckout
+	 *
+	 * @param string A URL encoded response from Paypal
+	 * @return array Nicely parsed array
+	 * @author Rob Mcvey
+	 **/
+	public function parseClassicApiResponse($response)
+	{
+		parse_str($response, $parsed);
+		return $parsed;
+	}
+
+	/**
+	 * Build the login url for an express checkout payment, user is redirected to this
+	 *
+	 * @param string $token
+	 * @return string
+	 * @author Rob Mcvey
+	 **/
+	public function expressCheckoutUrl($token)
+	{
+		$endpoint = $this->getPaypalLoginUri();
+		return "$endpoint?cmd=_express-checkout&token=$token";
+	}
+
+	/**
+	 * Returns the Paypal login URL for express checkout
+	 *
+	 * @return string
+	 * @author Rob Mcvey
+	 **/
+	public function getPaypalLoginUri()
+	{
+		if ($this->sandboxMode) {
+			return $this->sandboxPaypalLoginUri;
+		}
+		return $this->livePaypalLoginUri;
+	}
+
+	/**
+	 * Returns custom error message if there are any set for the error code passed in with the parsed response.
+	 * Returns the long message in the response otherwise.
+	 *
+	 * @author Chris Green
+	 * @param  array $parsed Parsed response
+	 * @return string         The error message
+	 */
+	public function getErrorMessage($parsed)
+	{
+		if (array_key_exists($parsed['L_ERRORCODE0'], $this->errorMessages)) {
+			return $this->errorMessages[$parsed['L_ERRORCODE0']];
+		}
+		return $parsed['L_LONGMESSAGE0'];
+	}
+
+	/**
  * GetExpressCheckoutDetails
  * Call GetExpressCheckoutDetails to obtain customer information
  * e.g. for customer review before payment
@@ -460,6 +592,74 @@ class Paypal {
 	}
 
 /**
+ * Takes a payment array and formats in to the minimum NVPs to complete a payment
+ *
+ * @param array Credit card/amount information (see tests)
+ * @return array Formatted array of Paypal NVPs for DoDirectPayment
+ * @author Rob Mcvey
+ **/
+	public function formatDoDirectPaymentNvps($payment)
+	{
+		// IP Address
+		if (!$this->CakeRequest) {
+			$this->CakeRequest = new CakeRequest();
+		}
+		$ipAddress = $this->CakeRequest->clientIp();
+		if (empty($ipAddress)) {
+			throw new PaypalException(__d('paypal', 'Could not detect client IP address'));
+		}
+		// Credit card number
+		if (!isset($payment['card'])) {
+			throw new PaypalException(__d('paypal', 'Not a valid credit card number'));
+		}
+		$payment['card'] = preg_replace("/\s/", "", $payment['card']);
+		// Credit card number
+		if (!isset($payment['cvv'])) {
+			throw new PaypalException(__d('paypal', 'You must include the 3 digit security number'));
+		}
+		$payment['cvv'] = preg_replace("/\s/", "", $payment['cvv']);
+		// Amount
+		if (!isset($payment['amount'])) {
+			throw new PaypalException(__d('paypal', 'Must specify an "amount" to charge'));
+		}
+		// Expiry
+		if (!isset($payment['expiry'])) {
+			throw new PaypalException(__d('paypal', 'Must specify an expiry date'));
+		}
+		$dateKeys = array_keys($payment['expiry']);
+		sort($dateKeys); // Sort alphabetcially
+		if ($dateKeys != array('M', 'Y')) {
+			throw new PaypalException(__d('paypal', 'Must include a M and Y in expiry date'));
+		}
+		$month = $payment['expiry']['M'];
+		$year = $payment['expiry']['Y'];
+		$expiry = sprintf('%d%d', $month, $year);
+		// Build NVps
+		$nvps = array(
+			'METHOD' => 'DoDirectPayment',
+			'VERSION' => $this->paypalClassicApiVersion,
+			'USER' => $this->nvpUsername,
+			'PWD' => $this->nvpPassword,
+			'SIGNATURE' => $this->nvpSignature,
+			'IPADDRESS' => $ipAddress,        // Required
+			'AMT' => $payment['amount'],    // The total cost of the transaction
+			'CURRENCYCODE' => 'GBP',        // A 3-character currency code
+			'RECURRING' => 'N',                // Recurring flag
+			'ACCT' => $payment['card'],        // Numeric characters only with no spaces
+			'EXPDATE' => $expiry,            // MMYYYY
+			'CVV2' => $payment['cvv'],        // xxx
+			'FIRSTNAME' => '',                // Required
+			'LASTNAME' => '',                // Required
+			'STREET' => '',                // Required
+			'CITY' => '',                    // Required
+			'STATE' => '',                    // Required
+			'COUNTRYCODE' => '',            // Required 2 single-byte characters
+			'ZIP' => '',                    // Required
+		);
+		return $nvps;
+	}
+
+	/**
  * DoCapture
  * The DoCapture API Operation enables you to charge a previously authorized payment
  *
@@ -652,13 +852,65 @@ class Paypal {
 	}
 
 /**
+ * Takes a refund transaction array and formats in to the minimum NVPs to process a refund
+ *
+ * @param array original transaction details and refund amount
+ * @return array Formatted array of Paypal NVPs for RefundTransaction
+ * @author James Mikkelson
+ **/
+	public function formatRefundTransactionNvps($refund)
+	{
+		// PayPal Transcation ID
+		if (!isset($refund['transactionId'])) {
+			throw new PaypalException(__d('paypal', 'Original PayPal Transaction ID is required'));
+		}
+		$refund['transactionId'] = preg_replace("/\s/", "", $refund['transactionId']);
+		// Amount to refund
+		if (!isset($refund['amount'])) {
+			throw new PaypalException(__d('paypal', 'Must specify an "amount" to refund'));
+		}
+		// Type of refund
+		if (!isset($refund['type'])) {
+			throw new PaypalException(__d('paypal', 'You must specify a refund type, such as Full or Partial'));
+		}
+		// Set reference
+		$reference = (isset($refund['reference'])) ? $refund['reference'] : '';
+		// Set note
+		$note = (isset($refund['note'])) ? $refund['note'] : false;
+		// Currency
+		$currency = (isset($refund['currency'])) ? $refund['currency'] : 'GBP';
+		// Source
+		$source = (isset($refund['source'])) ? $refund['source'] : 'any';
+		// Build our NVPs for the request
+		$nvps = array(
+			'METHOD' => 'RefundTransaction',
+			'VERSION' => $this->paypalClassicApiVersion,
+			'USER' => $this->nvpUsername,
+			'PWD' => $this->nvpPassword,
+			'SIGNATURE' => $this->nvpSignature,
+			'TRANSACTIONID' => $refund['transactionId'],    // The orginal PayPal Transaction ID
+			'INVOICEID' => $reference,                        // Your own reference or invoice number
+			'REFUNDTYPE' => $refund['type'],                // Full, Partial, ExternalDispute, Other
+			'CURRENCYCODE' => $currency,                    // Only required for partial refunds or refunds greater than 100%
+			'NOTE' => $note,                                // Up to 255 characters of information displayed to customer
+			'REFUNDSOURCE' => $source,                        // Any, default, instant, eCheck
+		);
+		// Refund amount, only set if REFUNDTYPE is Partial
+		if ($refund['type'] == 'Partial') {
+			$nvps['AMT'] = $refund['amount'];
+		}
+		return $nvps;
+	}
+
+/**
  * Store and use a customer credit card
  *
  * @return void
  * @author Rob Mcvey
  * @link https://developer.paypal.com/docs/integration/direct/store-a-credit-card/#store-a-credit-card
  **/
-	public function storeCreditCard($creditCard) {
+	public function storeCreditCard($creditCard)
+	{
 		// HttpSocket
 		if (!$this->HttpSocket) {
 			$this->HttpSocket = new HttpSocket();
@@ -672,50 +924,6 @@ class Paypal {
 		$endPoint = $this->storeCreditCardUrl();
 		// JSON encode our card array
 		$json = json_encode($this->formatStoreCreditCardArgs($creditCard));
-		// Add oAuth headers and content type headers
-		$request = array(
-			'method' => 'POST',
-			'header' => array(
-				'Content-Type' => 'application/json',
-				'Authorization' => $authHeader,
-			),
-			'uri' => $endPoint,
-			'body' => $json,
-		);
-		// Attempt to make REST request
-		$response = $this->HttpSocket->request($request);
-		// Decode the JSON
-		$responseArray = json_decode($response->body, true);
-		if ($response->code == 200) {
-			// Return an array
-			return $responseArray;
-		} else {
-			$message = (isset($responseArray['message'])) ? $responseArray['message'] : __d('paypal', 'There was an problem communicating with the payment gateway') ;
-			throw new PaypalException($message);
-		}
-	}
-
-/**
- * Charge a stored card
- *
- * @return void
- * @author Rob Mcvey
- * @link https://developer.paypal.com/docs/integration/direct/store-a-credit-card/#use-a-stored-credit-card
- **/
-	public function chargeStoredCard($transaction) {
-		// HttpSocket
-		if (!$this->HttpSocket) {
-			$this->HttpSocket = new HttpSocket();
-		}
-		// Get access token
-		$token = $this->getOAuthAccessToken();
-		$authHeader = sprintf('%s %s', $token['token_type'], $token['access_token']);
-		// Reset the HttpSocket as it's already been setup (with headers) by getOAuthAccessToken
-		$this->HttpSocket->reset();
-		// Get charge card endpoint
-		$endPoint = $this->chargeStoredCardUrl();
-		// JSON encode our card array
-		$json = json_encode($transaction);
 		// Add oAuth headers and content type headers
 		$request = array(
 			'method' => 'POST',
@@ -775,6 +983,42 @@ class Paypal {
 	}
 
 /**
+ * oAuthTokenUrl
+ *
+ * @return void
+ * @author Rob Mcvey
+ **/
+	public function oAuthTokenUrl()
+	{
+		return $this->getRestEndpoint() . '/v1/oauth2/token';
+	}
+
+	/**
+	 * Returns the Paypal REST API endpoint
+	 *
+	 * @return string
+	 * @author Rob Mcvey
+	 **/
+	public function getRestEndpoint()
+	{
+		if ($this->sandboxMode) {
+			return $this->sandboxRestEndpoint;
+		}
+		return $this->liveRestEndpoint;
+	}
+
+	/**
+	 * storeCreditCardUrl
+	 *
+	 * @return void
+	 * @author Rob Mcvey
+	 **/
+	public function storeCreditCardUrl()
+	{
+		return $this->getRestEndpoint() . '/v1/vault/credit-card';
+	}
+
+	/**
  * Takes an array containing info of a single card, and formats as per storeCreditCard
  * e.g.
  *  $creditCard = array(
@@ -854,238 +1098,48 @@ class Paypal {
 	}
 
 /**
- * Takes a payment array and formats in to the minimum NVPs to complete a payment
- *
- * @param array Credit card/amount information (see tests)
- * @return array Formatted array of Paypal NVPs for DoDirectPayment
- * @author Rob Mcvey
- **/
-	public function formatDoDirectPaymentNvps($payment) {
-		// IP Address
-		if (!$this->CakeRequest) {
-			$this->CakeRequest = new CakeRequest();
-		}
-		$ipAddress = $this->CakeRequest->clientIp();
-		if (empty($ipAddress)) {
-			throw new PaypalException(__d('paypal' , 'Could not detect client IP address'));
-		}
-		// Credit card number
-		if (!isset($payment['card'])) {
-			throw new PaypalException(__d('paypal' , 'Not a valid credit card number'));
-		}
-		$payment['card'] = preg_replace("/\s/" , "" , $payment['card']);
-		// Credit card number
-		if (!isset($payment['cvv'])) {
-			throw new PaypalException(__d('paypal' , 'You must include the 3 digit security number'));
-		}
-		$payment['cvv'] = preg_replace("/\s/" , "" , $payment['cvv']);
-		// Amount
-		if (!isset($payment['amount'])) {
-			throw new PaypalException(__d('paypal' , 'Must specify an "amount" to charge'));
-		}
-		// Expiry
-		if (!isset($payment['expiry'])) {
-			throw new PaypalException(__d('paypal' , 'Must specify an expiry date'));
-		}
-		$dateKeys = array_keys($payment['expiry']);
-		sort($dateKeys); // Sort alphabetcially
-		if ($dateKeys != array('M' , 'Y')) {
-			throw new PaypalException(__d('paypal' , 'Must include a M and Y in expiry date'));
-		}
-		$month = $payment['expiry']['M'];
-		$year = $payment['expiry']['Y'];
-		$expiry = sprintf('%d%d' , $month, $year);
-		// Build NVps
-		$nvps = array(
-			'METHOD' => 'DoDirectPayment',
-			'VERSION' => $this->paypalClassicApiVersion,
-			'USER' => $this->nvpUsername,
-			'PWD' => $this->nvpPassword,
-			'SIGNATURE' => $this->nvpSignature,
-			'IPADDRESS' => $ipAddress, 		// Required
-			'AMT' => $payment['amount'], 	// The total cost of the transaction
-			'CURRENCYCODE' => 'GBP',		// A 3-character currency code
-			'RECURRING' => 'N',				// Recurring flag
-			'ACCT' => $payment['card'],		// Numeric characters only with no spaces
-			'EXPDATE' => $expiry,			// MMYYYY
-			'CVV2' => $payment['cvv'],		// xxx
-			'FIRSTNAME' => '',				// Required
-			'LASTNAME' => '', 				// Required
-			'STREET' => '', 				// Required
-			'CITY' => '', 					// Required
-			'STATE' => '', 					// Required
-			'COUNTRYCODE' => '',			// Required 2 single-byte characters
-			'ZIP' => '', 					// Required
-		);
-		return $nvps;
-	}
-
-/**
- * Formats the order array to Paypal nvps
- *
- * @param array $order Takes an array order (See tests for supported fields).
- * @return array Formatted array of Paypal NVPs for setExpressCheckout
- * @author Rob Mcvey
- **/
-	public function buildExpressCheckoutNvp($order) {
-		if (empty($order) || !is_array($order)) {
-			throw new PaypalException(__d('paypal' , 'You must pass a valid order array'));
-		}
-		if (!isset($order['return']) || !isset($order['cancel'])) {
-			throw new PaypalException(__d('paypal' , 'Valid "return" and "cancel" urls must be provided'));
-		}
-		if (!isset($order['currency']))  {
-			throw new PaypalException(__d('paypal' , 'You must provide a currency code'));
-		}
-		$nvps = array(
-			'METHOD' => 'SetExpressCheckout',
-			'VERSION' => $this->paypalClassicApiVersion,
-			'PAYMENTREQUEST_0_PAYMENTACTION' => 'Sale',
-			'USER' => $this->nvpUsername,
-			'PWD' => $this->nvpPassword,
-			'SIGNATURE' => $this->nvpSignature,
-			'RETURNURL' => $order['return'],
-			'CANCELURL' => $order['cancel'],
-			'PAYMENTREQUEST_0_CURRENCYCODE' => $order['currency'],
-			'PAYMENTREQUEST_0_DESC' => $order['description'],
-		);
-		// Custom field?
-		if (isset($order['custom'])) {
-			$nvps['PAYMENTREQUEST_0_CUSTOM'] = $order['custom'];
-		}
-		// Add up each item and calculate totals
-		if (isset($order['items']) && is_array($order['items'])) {
-			// Cart totals
-			$nvps['PAYMENTREQUEST_0_ITEMAMT'] = 0;
-			$individualShipping = $nvps['PAYMENTREQUEST_0_SHIPPINGAMT'] = 0;
-			$nvps['PAYMENTREQUEST_0_TAXAMT'] = 0;
-			$nvps['PAYMENTREQUEST_0_AMT'] = 0;
-			// Build each item
-			foreach ($order['items'] as $m => $item) {
-				// Name and subtotal are required for each item
-				$nvps["L_PAYMENTREQUEST_0_NAME$m"] = $item['name'];
-				// Description an Tax are optional
-                if (array_key_exists("description", $item)) {
-					$nvps["L_PAYMENTREQUEST_0_DESC$m"] = $item['description'];
-				}
-				// Qty is optional however it effects our order totals
-				$quantity = $nvps["L_PAYMENTREQUEST_0_QTY$m"] = 1;
-				if (array_key_exists("qty", $item) && $item['qty'] > 1 && is_numeric($item['qty'])) {
-					$quantity = $nvps["L_PAYMENTREQUEST_0_QTY$m"] = (int) floor($item['qty']);
-				}
-				// Item subtotal
-				$nvps["L_PAYMENTREQUEST_0_AMT$m"] = $item['subtotal'];
-				// Shipping
-				if (array_key_exists("shipping", $item)) {
-					//$nvps['PAYMENTREQUEST_0_SHIPPINGAMT'] += ($item['shipping'] * $quantity);
-					$individualShipping += ($item['shipping'] * $quantity);
-				}
-				// Tax
-				if (array_key_exists("tax", $item)) {
-					$nvps["L_PAYMENTREQUEST_0_TAXAMT$m"] = $item['tax'];
-					$nvps['PAYMENTREQUEST_0_AMT'] += ($item['tax'] * $quantity);
-					$nvps['PAYMENTREQUEST_0_TAXAMT'] += ($item['tax'] * $quantity);
-				}
-				// Cart totals
-				$nvps['PAYMENTREQUEST_0_ITEMAMT'] += ($nvps["L_PAYMENTREQUEST_0_AMT$m"] * $quantity);
-				$nvps['PAYMENTREQUEST_0_AMT'] += ($nvps["L_PAYMENTREQUEST_0_AMT$m"] * $quantity);
-			}
-		}
-		// Custom/combined shipping for all items
-		if (isset($order['shipping']) && $order['shipping'] > 1 && is_numeric($order['shipping'])) {
-			$nvps['PAYMENTREQUEST_0_SHIPPINGAMT'] = $order['shipping'];
-			$nvps['PAYMENTREQUEST_0_AMT'] += $nvps['PAYMENTREQUEST_0_SHIPPINGAMT'];
-		} else if (isset($individualShipping)) {
-			$nvps['PAYMENTREQUEST_0_SHIPPINGAMT'] = $individualShipping;
-			$nvps['PAYMENTREQUEST_0_AMT'] += $individualShipping;
-		}
-		return $nvps;
-	}
-
-/**
- * Takes a refund transaction array and formats in to the minimum NVPs to process a refund
- *
- * @param array original transaction details and refund amount
- * @return array Formatted array of Paypal NVPs for RefundTransaction
- * @author James Mikkelson
-**/
-	public function formatRefundTransactionNvps($refund) {
-		// PayPal Transcation ID
-		if (!isset($refund['transactionId'])) {
-			throw new PaypalException(__d('paypal' , 'Original PayPal Transaction ID is required'));
-		}
-		$refund['transactionId'] = preg_replace("/\s/" , "" , $refund['transactionId']);
-		// Amount to refund
-		if (!isset($refund['amount'])) {
-			throw new PaypalException(__d('paypal' , 'Must specify an "amount" to refund'));
-		}
-		// Type of refund
-		if (!isset($refund['type'])) {
-			throw new PaypalException(__d('paypal' , 'You must specify a refund type, such as Full or Partial'));
-		}
-		// Set reference
-		$reference = (isset($refund['reference'])) ? $refund['reference'] : '';
-		// Set note
-		$note = (isset($refund['note'])) ? $refund['note'] : false;
-		// Currency
-		$currency = (isset($refund['currency'])) ? $refund['currency'] : 'GBP';
-		// Source
-		$source = (isset($refund['source'])) ? $refund['source'] : 'any';
-		// Build our NVPs for the request
-		$nvps = array(
-			'METHOD' => 'RefundTransaction',
-			'VERSION' => $this->paypalClassicApiVersion,
-			'USER' => $this->nvpUsername,
-			'PWD' => $this->nvpPassword,
-			'SIGNATURE' => $this->nvpSignature,
-			'TRANSACTIONID' => $refund['transactionId'],	// The orginal PayPal Transaction ID
-			'INVOICEID' => $reference,						// Your own reference or invoice number
-			'REFUNDTYPE' => $refund['type'],				// Full, Partial, ExternalDispute, Other
-			'CURRENCYCODE' => $currency, 					// Only required for partial refunds or refunds greater than 100%
-			'NOTE' => $note,								// Up to 255 characters of information displayed to customer
-			'REFUNDSOURCE' => $source,						// Any, default, instant, eCheck
-		);
-		// Refund amount, only set if REFUNDTYPE is Partial
-		if ($refund['type'] == 'Partial') {
-			$nvps['AMT'] = $refund['amount'];
-		}
-		return $nvps;
-	}
-
-/**
- * Returns the Paypal REST API endpoint
- *
- * @return string
- * @author Rob Mcvey
- **/
-	public function getRestEndpoint() {
-		if ($this->sandboxMode) {
-			return $this->sandboxRestEndpoint;
-		}
-		return $this->liveRestEndpoint;
-	}
-
-/**
- * Returns the Paypal Classic API endpoint
- *
- * @return string
- * @author Rob Mcvey
- **/
-	public function getClassicEndpoint() {
-		if ($this->sandboxMode) {
-			return $this->sandboxClassicEndpoint;
-		}
-		return $this->liveClassicEndpoint;
-	}
-
-/**
- * oAuthTokenUrl
+ * Charge a stored card
  *
  * @return void
  * @author Rob Mcvey
+ * @link https://developer.paypal.com/docs/integration/direct/store-a-credit-card/#use-a-stored-credit-card
  **/
-	public function oAuthTokenUrl() {
-		return $this->getRestEndpoint() . '/v1/oauth2/token';
+	public function chargeStoredCard($transaction)
+	{
+		// HttpSocket
+		if (!$this->HttpSocket) {
+			$this->HttpSocket = new HttpSocket();
+		}
+		// Get access token
+		$token = $this->getOAuthAccessToken();
+		$authHeader = sprintf('%s %s', $token['token_type'], $token['access_token']);
+		// Reset the HttpSocket as it's already been setup (with headers) by getOAuthAccessToken
+		$this->HttpSocket->reset();
+		// Get charge card endpoint
+		$endPoint = $this->chargeStoredCardUrl();
+		// JSON encode our card array
+		$json = json_encode($transaction);
+		// Add oAuth headers and content type headers
+		$request = array(
+			'method' => 'POST',
+			'header' => array(
+				'Content-Type' => 'application/json',
+				'Authorization' => $authHeader,
+			),
+			'uri' => $endPoint,
+			'body' => $json,
+		);
+		// Attempt to make REST request
+		$response = $this->HttpSocket->request($request);
+		// Decode the JSON
+		$responseArray = json_decode($response->body, true);
+		if ($response->code == 200) {
+			// Return an array
+			return $responseArray;
+		} else {
+			$message = (isset($responseArray['message'])) ? $responseArray['message'] : __d('paypal', 'There was an problem communicating with the payment gateway');
+			throw new PaypalException($message);
+		}
 	}
 
 /**
@@ -1096,67 +1150,6 @@ class Paypal {
  **/
 	public function chargeStoredCardUrl() {
 		return $this->getRestEndpoint() . '/v1/payments/payment';
-	}
-
-/**
- * storeCreditCardUrl
- *
- * @return void
- * @author Rob Mcvey
- **/
-	public function storeCreditCardUrl() {
-		return $this->getRestEndpoint() . '/v1/vault/credit-card';
-	}
-
-/**
- * Returns Paypal Adaptive Accounts API endpoint
- *
- * @author Chris Green
- * @return string
- **/
-	public function getAdaptiveAccountsEndpoint() {
-		if ($this->sandboxMode) {
-			return $this->sandboxAdaptiveAccountsEndpoint;
-		}
-		return $this->liveAdaptiveAccountsEndpoint;
-	}
-
-
-/**
- * Returns the Paypal login URL for express checkout
- *
- * @return string
- * @author Rob Mcvey
- **/
-	public function getPaypalLoginUri() {
-		if ($this->sandboxMode) {
-			return $this->sandboxPaypalLoginUri;
-		}
-		return $this->livePaypalLoginUri;
-	}
-
-/**
- * Build the login url for an express checkout payment, user is redirected to this
- *
- * @param string $token
- * @return string
- * @author Rob Mcvey
- **/
-	public function expressCheckoutUrl($token) {
-		$endpoint = $this->getPaypalLoginUri();
-		return "$endpoint?cmd=_express-checkout&token=$token";
-	}
-
-/**
- * Parse the body of the reponse from setExpressCheckout
- *
- * @param string A URL encoded response from Paypal
- * @return array Nicely parsed array
- * @author Rob Mcvey
- **/
-	public function parseClassicApiResponse($response) {
-		parse_str($response , $parsed);
-		return $parsed;
 	}
 
 }
